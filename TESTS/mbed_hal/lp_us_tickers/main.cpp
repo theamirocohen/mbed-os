@@ -26,8 +26,8 @@
 #endif
 
 #define FORCE_OVERFLOW_TEST (false)
-#define TICKER_INT_VAL 2000
-#define TICKER_DELTA 50
+#define TICKER_INT_VAL 500
+#define TICKER_DELTA 10
 
 #define LP_TICKER_OVERFLOW_DELTA 0 // this will allow to detect that ticker counter rollovers to 0
 #define HF_TICKER_OVERFLOW_DELTA 50
@@ -49,10 +49,9 @@ unsigned int ticker_overflow_delta;
 
 /* Auxiliary function to count ticker ticks elapsed during execution of N cycles of empty while loop.
  * Parameter <step> is used to disable compiler optimisation. */
-uint32_t count_ticks(volatile uint32_t cycles, uint32_t step)
+uint32_t count_ticks(uint32_t cycles, uint32_t step)
 {
-    /* Init the ticker. */
-    intf->init();
+    register uint32_t reg_cycles = cycles;
 
     core_util_critical_section_enter();
 
@@ -133,9 +132,7 @@ void ticker_info_test(void)
 /* Test that ticker interrupt fires only when the ticker counter increments to the value set by ticker_set_interrupt. */
 void ticker_interrupt_test(void)
 {
-    uint32_t ticker_timeout[] = { 100, 500, 1000, 2000 };
-
-    intf->init();
+    uint32_t ticker_timeout[] = { 100, 200, 300, 500 };
 
     for (uint32_t i = 0; i < (sizeof(ticker_timeout) / sizeof(uint32_t)); i++) {
         intFlag = 0;
@@ -152,17 +149,17 @@ void ticker_interrupt_test(void)
             TEST_ASSERT_EQUAL_INT_MESSAGE(0, intFlag, "Interrupt fired too early");
         }
 
-        /* Wait until ticker count reach value: tick_count + ticker_timeout[i].
+        /* Wait until ticker count reach value: tick_count + ticker_timeout[i] + TICKER_DELTA.
          * Interrupt should be fired after this time. */
-        while (intf->read() < (tick_count + ticker_timeout[i])) {
+        while (intf->read() < (tick_count + ticker_timeout[i] + TICKER_DELTA)) {
             /* Just wait. */
         }
 
         TEST_ASSERT_EQUAL(1, intFlag);
 
-        /* Wait until ticker count reach value: tick_count + 3 * ticker_timeout[i].
+        /* Wait until ticker count reach value: tick_count + 2 * ticker_timeout[i] + TICKER_DELTA.
          * Interrupt should not be triggered again. */
-        while (intf->read() < (tick_count + 3 * ticker_timeout[i])) {
+        while (intf->read() < (tick_count + 2 * ticker_timeout[i] + TICKER_DELTA)) {
             /* Just wait. */
         }
 
@@ -174,8 +171,6 @@ void ticker_interrupt_test(void)
 void ticker_past_test(void)
 {
     intFlag = 0;
-
-    intf->init();
 
     const uint32_t tick_count = intf->read();
 
@@ -192,8 +187,6 @@ void ticker_past_test(void)
 void ticker_repeat_reschedule_test(void)
 {
     intFlag = 0;
-
-    intf->init();
 
     const uint32_t tick_count = intf->read();
 
@@ -227,8 +220,6 @@ void ticker_fire_now_test(void)
 {
     intFlag = 0;
 
-    intf->init();
-
     intf->fire_interrupt();
 
     /* On some platforms set_interrupt function sets interrupt in the nearest feature. */
@@ -255,8 +246,6 @@ void ticker_overflow_test(void)
     }
 
     intFlag = 0;
-
-    intf->init();
 
     /* Wait for max count. */
     while (intf->read() != (max_count - ticker_overflow_delta)) {
@@ -296,8 +285,6 @@ void ticker_overflow_test(void)
 /* Test that the ticker increments by one on each tick. */
 void ticker_increment_test(void)
 {
-    intf->init();
-
     const ticker_info_t* p_ticker_info = intf->get_info();
 
     /* Perform test based on ticker speed. */
@@ -333,8 +320,6 @@ void ticker_speed_test(void)
 {
     Timer timer;
     int counter = NUM_OF_CALLS;
-
-    intf->init();
 
     /* ---- Test ticker_read function. ---- */
     timer.reset();
@@ -391,14 +376,37 @@ void ticker_speed_test(void)
     TEST_ASSERT(timer.read_us() < (NUM_OF_CALLS * (MAX_FUNC_EXEC_TIME_US + DELTA_FUNC_EXEC_TIME_US)));
 }
 
+/* Since according to the ticker requirements min acceptable counter size is
+ * 12 bits (low power timer)  for which max count is
+ * 4095, then all test cases must be executed in this time window.
+ * HAL ticker layer handles overflow and it is not handled in the target
+ * ticker drivers.
+ */
+void overflow_protect()
+{
+    const uint32_t ticks_now = intf->read();
+    const ticker_info_t* p_ticker_info = intf->get_info();
+
+    const uint32_t max_count = (1 << p_ticker_info->bits - 1);
+
+    if ((max_count - ticks_now) > 4000) {
+        return;
+    }
+
+    while (intf->read() > ticks_now);
+}
 
 utest::v1::status_t hf_ticker_setup(const Case *const source, const size_t index_of_case)
 {
     intf = get_us_ticker_data()->interface;
 
+    intf->init();
+
     set_us_ticker_irq_handler(ticker_event_handler_stub);
 
     ticker_overflow_delta = HF_TICKER_OVERFLOW_DELTA;
+
+    overflow_protect();
 
     return greentea_case_setup_handler(source, index_of_case);
 }
@@ -408,9 +416,13 @@ utest::v1::status_t lp_ticker_setup(const Case *const source, const size_t index
 {
     intf = get_lp_ticker_data()->interface;
 
+    intf->init();
+
     set_lp_ticker_irq_handler(ticker_event_handler_stub);
 
     ticker_overflow_delta = LP_TICKER_OVERFLOW_DELTA;
+
+    overflow_protect();
 
     return greentea_case_setup_handler(source, index_of_case);
 }
